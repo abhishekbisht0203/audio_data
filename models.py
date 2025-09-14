@@ -7,5 +7,5 @@ class AudioFile(Base):
     id = Column(Integer, primary_key=True, index=True)
     file_name = Column(String, nullable=False)
     audio_data = Column(LargeBinary, nullable=False)
-    file_metadata = Column(JSON)   # <-- renamed from metadata
+    file_metadata = Column(JSON)   # renamed from `metadata`
     created_at = Column(DateTime(timezone=True), server_default=func.now())
