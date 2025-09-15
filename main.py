@@ -1,7 +1,6 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException, Depends
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
-import json
 
 from database import get_db
 from models import AudioFile
@@ -14,6 +13,7 @@ def root():
     return {"ok": True}
 
 
+# ✅ Upload API
 @app.post("/upload-audio")
 async def upload_audio(file: UploadFile = File(...), db: Session = Depends(get_db)):
     filename = file.filename
@@ -22,7 +22,7 @@ async def upload_audio(file: UploadFile = File(...), db: Session = Depends(get_d
     new_file = AudioFile(
         file_name=filename,
         audio_data=data,
-        metadata={"uploaded_by": "FastAPI"}
+        file_metadata={"uploaded_by": "FastAPI"}  # updated
     )
     db.add(new_file)
     db.commit()
@@ -34,6 +34,21 @@ async def upload_audio(file: UploadFile = File(...), db: Session = Depends(get_d
         "created_at": new_file.created_at,
         "status": "saved to PostgreSQL (ORM via Alembic-managed DB)"
     }
+
+
+# ✅ List Uploads API
+@app.get("/list-audios")
+def list_audios(db: Session = Depends(get_db)):
+    files = db.query(AudioFile).all()
+    return [
+        {
+            "id": f.id,
+            "file_name": f.file_name,
+            "created_at": f.created_at.isoformat() if f.created_at else None,
+            "metadata": f.file_metadata   # updated
+        }
+        for f in files
+    ]
 
 
 @app.get("/download-audio/{file_id}")
