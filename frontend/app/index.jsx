@@ -12,7 +12,7 @@ import {
 import "../global.css";
 
 // API Base URL
-const API_BASE_URL = "http://127.0.0.1:8000";
+const API_BASE_URL = "https://audio-data.onrender.com";
 
 // --- Helper Hook for Audio Recording ---
 const useAudioRecorder = () => {
