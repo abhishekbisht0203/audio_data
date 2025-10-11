@@ -11,10 +11,11 @@
   "include": [
     "**/*.ts",
     "**/*.tsx",
+    "**/*.js",     // <-- ADDED to include all plain JS files
+    "**/*.jsx",    // <-- ADDED to include all JSX files like index.jsx
     ".expo/types/**/*.ts",
     "expo-env.d.ts",
-    "app/(tabs)/index.jsx",
-    "app/_layout.jsx",
     "nativewind-env.d.ts"
+    // Removed specific file paths, relying on the wildcards (**/*.jsx) to cover all components
   ]
 }

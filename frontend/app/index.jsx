@@ -1,492 +1,596 @@
+import "../global.css";
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import {
-    FaUpload,
-    FaMicrophone,
-    FaStopCircle,
-    FaFilter,
-    FaRedoAlt,
-    FaFileAudio,
-    FaDownload,
-} from "react-icons/fa";
+  View,
+  Text,
+  TouchableOpacity,
+  ActivityIndicator,
+  Alert,
+  ScrollView,
+} from "react-native";
+import { Audio } from "expo-av";
+import * as FileSystem from "expo-file-system";
+import * as Sharing from "expo-sharing";
+import * as DocumentPicker from "expo-document-picker";
+import { MaterialCommunityIcons, FontAwesome5 } from "@expo/vector-icons";
+import DateTimePicker from "@react-native-community/datetimepicker";
 
-import "../global.css";
-
-// API Base URL
 const API_BASE_URL = "https://audio-data.onrender.com";
 
-// --- Helper Hook for Audio Recording ---
-const useAudioRecorder = () => {
-    const [isRecording, setIsRecording] = useState(false);
-    const [recordingBlob, setRecordingBlob] = useState(null);
-    const mediaRecorderRef = useRef(null);
-    const chunksRef = useRef([]);
-
-    const startRecording = async () => {
-        if (!navigator.mediaDevices) {
-            alert("Audio recording is not supported in this browser.");
-            return;
-        }
-        try {
-            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            mediaRecorderRef.current = new MediaRecorder(stream);
-            
-            chunksRef.current = [];
-            mediaRecorderRef.current.ondataavailable = (e) => {
-                chunksRef.current.push(e.data);
-            };
-
-            mediaRecorderRef.current.onstop = () => {
-                const blob = new Blob(chunksRef.current, { type: 'audio/webm; codecs=opus' });
-                setRecordingBlob(blob);
-                stream.getTracks().forEach(track => track.stop());
-            };
-
-            mediaRecorderRef.current.start();
-            setIsRecording(true);
-            setRecordingBlob(null);
-        } catch (err) {
-            console.error("Error accessing microphone:", err);
-            alert("Could not access microphone. Please check permissions.");
-        }
-    };
-
-    const stopRecording = () => {
-        if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
-            mediaRecorderRef.current.stop();
-            setIsRecording(false);
-        }
-    };
-
-    const resetRecording = () => {
-        setRecordingBlob(null);
-        setIsRecording(false);
-    };
-
-    return { isRecording, recordingBlob, startRecording, stopRecording, resetRecording };
-};
-// ---------------------------------------
-
-// --- NEW HELPER FUNCTION FOR TIMEZONE CONVERSION ---
 const formatUtcToLocal = (utcTimestamp) => {
-    if (!utcTimestamp) return '';
-    // Use 'Z' if no timezone info is present to explicitly treat it as UTC
-    const date = new Date(utcTimestamp.endsWith('Z') || utcTimestamp.includes('+') ? utcTimestamp : `${utcTimestamp}Z`);
-    
-    return date.toLocaleTimeString(navigator.language, { 
-        year: 'numeric', 
-        month: 'short', 
-        day: 'numeric', 
-        hour: '2-digit', 
-        minute: '2-digit',
-        second: '2-digit',
-        hour12: true 
-    });
+  if (!utcTimestamp) return "";
+  const date = new Date(
+    utcTimestamp.endsWith("Z") || utcTimestamp.includes("+")
+      ? utcTimestamp
+      : `${utcTimestamp}Z`
+  );
+  return date.toLocaleString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: true,
+  });
 };
 
-/**
- * Converts local 'datetime-local' string (YYYY-MM-DDTHH:MM) to ISO string (UTC)
- */
-const convertLocalToUTC = (localDateTime) => {
-    if (!localDateTime) return "";
-    const date = new Date(localDateTime); 
-    return date.toISOString(); 
+const convertLocalToUTC = (localDate) =>
+  localDate ? localDate.toISOString() : "";
+
+const useAudioRecorder = () => {
+  const [isRecording, setIsRecording] = useState(false);
+  const [recordingUri, setRecordingUri] = useState(null);
+  const recordingRef = useRef(null);
+
+  const startRecording = async () => {
+    try {
+      const permission = await Audio.requestPermissionsAsync();
+      if (!permission?.granted) {
+        Alert.alert("Permission required", "Microphone access is needed.");
+        return;
+      }
+
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: true,
+        playsInSilentModeIOS: true,
+      });
+
+      const { recording } = await Audio.Recording.createAsync(
+        Audio.RecordingOptionsPresets.HIGH_QUALITY
+      );
+
+      recordingRef.current = recording;
+      setIsRecording(true);
+      setRecordingUri(null);
+    } catch (err) {
+      console.error("Failed to start recording", err);
+      Alert.alert(
+        "Error",
+        "Could not start recording. Check microphone permissions."
+      );
+    }
+  };
+
+  const stopRecording = async () => {
+    try {
+      if (!recordingRef.current) return;
+      await recordingRef.current.stopAndUnloadAsync();
+      const uri = recordingRef.current.getURI();
+      if (uri) setRecordingUri(uri);
+      setIsRecording(false);
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: false,
+      });
+    } catch (err) {
+      console.error("Failed to stop recording", err);
+      Alert.alert("Error", "Failed to stop recording.");
+    }
+  };
+
+  const resetRecording = () => {
+    setRecordingUri(null);
+    setIsRecording(false);
+    recordingRef.current = null;
+  };
+
+  return {
+    isRecording,
+    recordingUri,
+    startRecording,
+    stopRecording,
+    resetRecording,
+  };
 };
-// ---------------------------------------------------
 
+export default function AudioUploaderScreen() {
+  const [uploadedFile, setUploadedFile] = useState(null);
+  const [audios, setAudios] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [downloadingId, setDownloadingId] = useState(null);
 
-export default function UploadScreen() {
-    const [uploadedFile, setUploadedFile] = useState(null);
-    const [audios, setAudios] = useState([]);
-    const [loading, setLoading] = useState(false);
-    const [downloadingId, setDownloadingId] = useState(null);
-    
-    // Date Filtering State (Causing missing dependencies warning in the original code)
-    const [startDate, setStartDate] = useState("");
-    const [endDate, setEndDate] = useState(""); 
-    
-    const { isRecording, recordingBlob, startRecording, stopRecording, resetRecording } = useAudioRecorder();
-    const [recordDuration, setRecordDuration] = useState(0);
-    
-    // FIX 1: Keeping the state and using it in the cleanup useEffect below. 
-    // (This line is correct, the fix is in the hook below it)
-    const [previewAudioUrl, setPreviewAudioUrl] = useState(null); 
+  const [startDate, setStartDate] = useState(null);
+  const [endDate, setEndDate] = useState(null);
+  const [showStartDatePicker, setShowStartDatePicker] = useState(false);
+  const [showEndDatePicker, setShowEndDatePicker] = useState(false);
 
+  const {
+    isRecording,
+    recordingUri,
+    startRecording,
+    stopRecording,
+    resetRecording,
+  } = useAudioRecorder();
 
-    // Timer for visual feedback
-    useEffect(() => {
-        let timer;
-        if (isRecording) {
-            setRecordDuration(0);
-            timer = setInterval(() => {
-                setRecordDuration(prev => prev + 1);
-            }, 1000);
-        } else {
-            clearInterval(timer);
+  const [recordDuration, setRecordDuration] = useState(0);
+
+  const playbackSoundRef = useRef(null);
+  const [isPlayingPreview, setIsPlayingPreview] = useState(false);
+
+  useEffect(() => {
+    let timer;
+    if (isRecording) {
+      setRecordDuration(0);
+      timer = setInterval(() => setRecordDuration((p) => p + 1), 1000);
+    }
+    return () => clearInterval(timer);
+  }, [isRecording]);
+
+  const formatTime = (seconds) => {
+    const min = Math.floor(seconds / 60);
+    const sec = seconds % 60;
+    return `${min.toString().padStart(2, "0")}:${sec
+      .toString()
+      .padStart(2, "0")}`;
+  };
+
+  const fetchAudios = useCallback(async (start, end) => {
+    setLoading(true);
+    try {
+      let url = `${API_BASE_URL}/list-audios`;
+      const params = new URLSearchParams();
+      const startUTC = convertLocalToUTC(start);
+      const endUTC = convertLocalToUTC(end);
+      if (startUTC) params.append("start_time", startUTC);
+      if (endUTC) params.append("end_time", endUTC);
+      if (params.toString()) url = `${url}?${params.toString()}`;
+
+      const res = await fetch(url);
+      if (!res.ok) throw new Error("Failed to fetch audios");
+      const data = await res.json();
+      setAudios(data);
+    } catch (err) {
+      console.error("Error fetching audios:", err);
+      Alert.alert("Error", "Failed to load audio list.");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchAudios(startDate, endDate);
+  }, [startDate, endDate, fetchAudios]);
+
+  const handleFileChange = async () => {
+    if (isRecording || recordingUri) return;
+    try {
+      const result = await DocumentPicker.getDocumentAsync({
+        type: "audio/*",
+        copyToCacheDirectory: true,
+      });
+
+      if (!result.canceled && result.assets && result.assets.length > 0) {
+        const file = result.assets[0];
+        setUploadedFile({ uri: file.uri, name: file.name });
+      }
+    } catch (err) {
+      console.error("Document Picker Error:", err);
+      Alert.alert("Error", "Failed to pick file.");
+    }
+    resetRecording();
+  };
+
+  const fileToUpload = uploadedFile?.uri || recordingUri;
+  const fileName = uploadedFile?.name || `recorded-audio-${Date.now()}.m4a`;
+
+  const handleUpload = async () => {
+    if (!fileToUpload) return;
+    setLoading(true);
+    try {
+      const uploadRes = await FileSystem.uploadAsync(
+        `${API_BASE_URL}/upload-audio`,
+        fileToUpload,
+        {
+          fieldName: "file",
+          httpMethod: "POST",
+          uploadType: FileSystem.FileSystemUploadType.MULTIPART,
         }
-        return () => clearInterval(timer);
-    }, [isRecording]);
+      );
 
-    // 💡 FIX 2: Audio Preview and Cleanup (Resolves Unused Variable Warning)
-    // The previous implementation was slightly confusing. This one explicitly creates the URL 
-    // and then uses `setPreviewAudioUrl` to save it. The cleanup hook below is now cleaner.
-    useEffect(() => {
-        if (recordingBlob) {
-            const url = URL.createObjectURL(recordingBlob);
-            setPreviewAudioUrl(url); 
-        } else {
-            setPreviewAudioUrl(null);
-        }
-    }, [recordingBlob]);
-    
-    // 💡 FIX 3: Cleanup Hook (Resolves Unused Variable Warning - final use)
-    useEffect(() => {
-        // This function runs on unmount OR when previewAudioUrl changes
-        return () => {
-            if (previewAudioUrl) {
-                // USAGE APPLIED HERE: This resolves the 'eslint(no-unused-vars)' warning
-                URL.revokeObjectURL(previewAudioUrl);
-            } 
-        };
-    }, [previewAudioUrl]); // <-- Dependency must be included for proper cleanup
+      if (uploadRes.status >= 400) {
+        const errorBody = JSON.parse(uploadRes.body || "{}");
+        throw new Error(
+          errorBody.detail ||
+            `Server responded with status: ${uploadRes.status}`
+        );
+      }
 
-    // --- FIX 4: Stabilize fetchAudios with useCallback ---
-    // This allows us to use fetchAudios as a dependency without causing infinite re-renders.
-    // It also correctly uses the current state of startDate and endDate.
-    const fetchAudios = useCallback(async (startLocal, endLocal) => {
-        setLoading(true);
-        let url = `${API_BASE_URL}/list-audios`;
-        const params = new URLSearchParams();
+      setUploadedFile(null);
+      resetRecording();
+      setRecordDuration(0);
+      fetchAudios(startDate, endDate);
+      Alert.alert("Success", "Audio uploaded successfully!");
+    } catch (err) {
+      console.error("Upload Error:", err);
+      Alert.alert(
+        "Upload Failed",
+        err.message || "An unknown error occurred during upload."
+      );
+    } finally {
+      setLoading(false);
+    }
+  };
 
-        // Convert LOCAL datetime strings from input fields to UTC for the backend
-        const startUTC = convertLocalToUTC(startLocal);
-        const endUTC = convertLocalToUTC(endLocal);
+  const handleDownload = async (fileId, originalFileName) => {
+    setDownloadingId(fileId);
+    try {
+      const safeName = (originalFileName || `audio-${fileId}`).replace(
+        /[^a-z0-9.]/gi,
+        "_"
+      );
+      const dest = `${FileSystem.documentDirectory}${safeName}`;
+      const downloadRes = await FileSystem.downloadAsync(
+        `${API_BASE_URL}/download-audio/${fileId}`,
+        dest
+      );
 
-        if (startUTC) {
-            params.append("start_time", startUTC); 
-        }
-        if (endUTC) {
-            params.append("end_time", endUTC);
-        }
+      if (!downloadRes?.uri) throw new Error("Download failed");
 
-        if (params.toString()) {
-            url = `${url}?${params.toString()}`;
-        }
+      if (await Sharing.isAvailableAsync()) {
+        await Sharing.shareAsync(downloadRes.uri, {
+          UTI: "public.audio",
+          mimeType: "audio/flac",
+        });
+      } else {
+        Alert.alert("Success", `File saved to: ${downloadRes.uri}`);
+      }
+    } catch (err) {
+      console.error("Download Error:", err);
+      Alert.alert(
+        "Download failed",
+        err.message || "An unknown error occurred during download."
+      );
+    } finally {
+      setDownloadingId(null);
+    }
+  };
 
+  const playPreview = async (uri) => {
+    try {
+      if (!uri) return;
+      if (playbackSoundRef.current) {
         try {
-            const res = await fetch(url);
-            if (!res.ok) throw new Error("Failed to fetch audios");
-            const data = await res.json();
-            setAudios(data);
-        } catch (err) {
-            console.error("Error fetching audios:", err);
-        } finally {
-            setLoading(false);
+          await playbackSoundRef.current.unloadAsync();
+        } catch (e) {}
+        playbackSoundRef.current = null;
+      }
+
+      const { sound } = await Audio.Sound.createAsync({ uri });
+      playbackSoundRef.current = sound;
+
+      sound.setOnPlaybackStatusUpdate((status) => {
+        if (status.isLoaded && status.didJustFinish) {
+          setIsPlayingPreview(false);
         }
-    }, []); // Empty dependency array ensures this function is stable across renders
+      });
 
-    // 💡 FIX 5: Primary Data Fetching Hook (Resolves Missing Dependencies Warning)
-    // Resolves: "React Hook useEffect has missing dependencies: 'endDate' and 'startDate'."
-    useEffect(() => {
-        // When the component mounts OR when startDate or endDate change, re-fetch the data.
-        // We use the current state of startDate and endDate in the call.
-        fetchAudios(startDate, endDate);
-        
-        // This array ensures the hook re-runs only when the dates change or fetchAudios changes (it won't, due to useCallback)
-    }, [startDate, endDate, fetchAudios]); // <-- FIX APPLIED HERE!
+      setIsPlayingPreview(true);
+      await sound.playAsync();
+    } catch (err) {
+      console.error("Playback Error:", err);
+      Alert.alert("Playback failed", "Unable to play the audio.");
+      setIsPlayingPreview(false);
+    }
+  };
 
-    // Handle file picker change
-    const handleFileChange = (event) => {
-        setUploadedFile(event.target.files[0]);
-        resetRecording();
+  const stopPreview = async () => {
+    try {
+      if (!playbackSoundRef.current) return;
+      await playbackSoundRef.current.stopAsync();
+      await playbackSoundRef.current.unloadAsync();
+      playbackSoundRef.current = null;
+    } catch (err) {}
+    setIsPlayingPreview(false);
+  };
+
+  useEffect(() => {
+    return () => {
+      if (playbackSoundRef.current) {
+        playbackSoundRef.current.unloadAsync().catch(() => {});
+        playbackSoundRef.current = null;
+      }
     };
+  }, []);
 
-    const fileToUpload = uploadedFile || recordingBlob;
+  const onChangeStartDate = (_, selectedDate) => {
+    setShowStartDatePicker(false);
+    if (selectedDate) setStartDate(selectedDate);
+  };
 
-    // --- Handle Upload (Uses fetchAudios to refetch) ---
-    const handleUpload = async () => {
-        if (!fileToUpload) return;
-        setLoading(true);
+  const onChangeEndDate = (_, selectedDate) => {
+    setShowEndDatePicker(false);
+    if (selectedDate) setEndDate(selectedDate);
+  };
 
-        const formData = new FormData();
-        const fileName = uploadedFile 
-            ? uploadedFile.name 
-            : `recorded-audio-${Date.now()}.webm`;
-            
-        formData.append("file", fileToUpload, fileName);
+  const handleFilter = () => fetchAudios(startDate, endDate);
+  const handleResetFilters = () => {
+    setStartDate(null);
+    setEndDate(null);
+  };
 
-        try {
-            const res = await fetch(`${API_BASE_URL}/upload-audio`, {
-                method: "POST",
-                body: formData,
-            });
+  const formatDateForDisplay = (date) =>
+    date ? date.toLocaleString() : "Select Date/Time";
 
-            if (!res.ok) {
-                const errorBody = await res.json();
-                throw new Error(errorBody.detail || `Server responded with status: ${res.status}`);
-            }
-            
-            setUploadedFile(null);
-            resetRecording();
-            setRecordDuration(0);
-            
-            // Refetch with current filters
-            fetchAudios(startDate, endDate); 
-        } catch (err) {
-            console.error("Upload Error:", err);
-            alert(`Upload Failed: ${err.message}`);
-        } finally {
-            setLoading(false);
-        }
-    };
+  return (
+    <ScrollView
+      contentContainerStyle={{ flexGrow: 1, paddingVertical: 40 }}
+      className="flex-1 bg-indigo-100"
+    >
+      <View className="max-w-2xl w-11/12 p-6 bg-white/95 rounded-3xl shadow-2xl mx-auto self-center">
+        <View className="flex-row items-center justify-center mb-6 gap-2">
+          <FontAwesome5 name="file-audio" size={24} color="#4f46e5" />
+          <Text className="text-3xl font-bold text-indigo-600">
+            Audio Uploader
+          </Text>
+        </View>
 
-    // --- Handle Download ---
-    const handleDownload = async (fileId, originalFileName) => {
-        setDownloadingId(fileId);
-        try {
-            const res = await fetch(`${API_BASE_URL}/download-audio/${fileId}`);
-            
-            if (!res.ok) {
-                throw new Error(`Download failed with status: ${res.status}`);
-            }
-            
-            const blob = await res.blob();
-            
-            const url = window.URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            
-            const baseName = originalFileName.includes('.') 
-                ? originalFileName.split('.').slice(0, -1).join('.') 
-                : originalFileName;
+        <View className="p-4 bg-indigo-50 rounded-2xl border border-indigo-200 mb-6">
+          <Text className="text-xl font-bold text-indigo-700 mb-3">
+            Record or Upload
+          </Text>
 
-            a.download = `${baseName}_download.flac`; 
-            
-            document.body.appendChild(a);
-            a.click();
-            a.remove();
-            window.URL.revokeObjectURL(url);
+          <View className="flex-row gap-2 mb-3">
+            <TouchableOpacity
+              onPress={isRecording ? stopRecording : startRecording}
+              disabled={loading || !!uploadedFile}
+              className={`flex-1 flex-row items-center justify-center py-3 rounded-xl gap-2 ${
+                isRecording
+                  ? "bg-red-500"
+                  : loading || uploadedFile
+                  ? "bg-gray-300"
+                  : "bg-indigo-500"
+              }`}
+            >
+              <MaterialCommunityIcons
+                name={isRecording ? "stop-circle" : "microphone"}
+                size={20}
+                color="white"
+              />
+              <Text className="text-white font-semibold">
+                {isRecording
+                  ? `Stop Recording (${formatTime(recordDuration)})`
+                  : "Start Recording"}
+              </Text>
+            </TouchableOpacity>
 
-        } catch (err) {
-            console.error("Download Error:", err);
-            alert(`Download failed: ${err.message}`);
-        } finally {
-            setDownloadingId(null);
-        }
-    };
+            {recordingUri && (
+              <TouchableOpacity
+                onPress={resetRecording}
+                className="bg-yellow-500 px-3 rounded-xl items-center justify-center"
+                disabled={loading}
+              >
+                <MaterialCommunityIcons name="redo" size={20} color="white" />
+              </TouchableOpacity>
+            )}
+          </View>
 
+          {(recordingUri || uploadedFile) && (
+            <View className="p-3 bg-white rounded-lg border border-indigo-200 mb-3">
+              <Text className="text-sm font-medium text-gray-700 mb-2">
+                Audio Preview
+              </Text>
 
-    const handleFilter = () => {
-        // Trigger fetch with the current local date-time inputs
-        fetchAudios(startDate, endDate);
-    };
-    
-    const handleResetFilters = () => {
-        setStartDate("");
-        setEndDate("");
-        // After clearing, fetch all audios
-        fetchAudios("", ""); 
-    };
-
-    const formatTime = (seconds) => {
-        const min = Math.floor(seconds / 60);
-        const sec = seconds % 60;
-        return `${min.toString().padStart(2, '0')}:${sec.toString().padStart(2, '0')}`;
-    };
-    
-
-    return (
-        <div className="min-h-screen flex items-center justify-center p-6 bg-gradient-to-br from-indigo-400 via-purple-300 to-pink-300 font-sans">
-            <div className="w-full max-w-xl p-8 bg-white/70 backdrop-blur-lg rounded-3xl shadow-2xl border border-white/30 transition-all hover:shadow-purple-200">
-                
-                {/* Header */}
-                <h1 className="text-4xl font-extrabold text-gray-800 mb-8 tracking-tight flex items-center justify-center">
-                    <FaFileAudio className="mr-3 text-indigo-600 drop-shadow-md" />
-                    <span className="bg-gradient-to-r from-indigo-600 to-purple-600 bg-clip-text text-transparent">
-                        Audio Uploader
-                    </span>
-                </h1>
-
-                {/* --- Recorder and File Picker Section --- */}
-                <div className="space-y-4 mb-8 p-4 bg-indigo-50 rounded-2xl border border-indigo-200">
-                    <h2 className="text-xl font-bold text-indigo-700 mb-3">Record or Upload</h2>
-                    
-                    {/* Record Button */}
-                    <div className="flex justify-between items-center space-x-2">
-                        <button
-                            onClick={isRecording ? stopRecording : startRecording}
-                            disabled={loading || uploadedFile}
-                            className={`flex-1 py-3 rounded-xl font-semibold text-lg shadow-md transition-all duration-300 transform flex items-center justify-center ${
-                                isRecording 
-                                ? "bg-red-500 text-white hover:bg-red-600 active:scale-95"
-                                : "bg-indigo-500 text-white hover:bg-indigo-600 active:scale-95 disabled:bg-gray-300 disabled:text-gray-600 disabled:cursor-not-allowed"
-                            }`}
-                        >
-                            {isRecording ? <FaStopCircle className="mr-2" /> : <FaMicrophone className="mr-2" />}
-                            {isRecording ? `Stop Recording (${formatTime(recordDuration)})` : "Start Recording"}
-                        </button>
-                        {recordingBlob && (
-                            <button
-                                onClick={resetRecording}
-                                className="p-3 rounded-full bg-yellow-500 text-white hover:bg-yellow-600 transition-colors active:scale-95"
-                                title="Clear Recording"
-                            >
-                                <FaRedoAlt />
-                            </button>
-                        )}
-                    </div>
-
-                    {/* Audio Preview */}
-                    {previewAudioUrl && (
-                        <div className="p-3 bg-white rounded-lg border border-indigo-200">
-                            <h3 className="text-sm font-medium text-gray-700 mb-2">Recorded Audio Preview</h3>
-                            <audio controls src={previewAudioUrl} className="w-full" />
-                        </div>
-                    )}
-                    
-                    <div className="text-center text-sm text-gray-500 py-1">--- OR ---</div>
-                    
-                    {/* File Picker */}
-                    <label className={`w-full py-3 rounded-xl shadow-md flex items-center justify-center cursor-pointer border transition-all duration-300 ${
-                        isRecording || recordingBlob
-                        ? "bg-gray-100 border-gray-300 cursor-not-allowed"
-                        : "bg-white/80 border-indigo-300 hover:shadow-xl hover:scale-[1.02] active:scale-95"
-                    }`}>
-                        <FaUpload className="text-indigo-600 mr-2 text-xl" />
-                        <span className="text-indigo-700 font-semibold text-lg truncate">
-                            {uploadedFile ? `File: ${uploadedFile.name}` : "Choose File"}
-                        </span>
-                        <input
-                            type="file"
-                            accept="audio/*"
-                            className="hidden"
-                            onChange={handleFileChange}
-                            disabled={isRecording || recordingBlob}
-                        />
-                    </label>
-                </div>
-
-                {/* --- Upload Button --- */}
-                <button
-                    onClick={handleUpload}
-                    disabled={loading || !fileToUpload}
-                    className={`w-full py-4 rounded-2xl flex items-center justify-center font-semibold text-lg shadow-lg transition-all duration-300 transform mb-8 ${
-                        loading || !fileToUpload
-                        ? "bg-gray-300 text-gray-600 cursor-not-allowed"
-                        : "bg-gradient-to-r from-indigo-500 to-purple-600 text-white hover:scale-[1.02] hover:shadow-xl active:scale-95"
-                    }`}
+              <View className="flex-row items-center gap-3">
+                <TouchableOpacity
+                  onPress={() =>
+                    isPlayingPreview
+                      ? stopPreview()
+                      : playPreview(recordingUri || uploadedFile?.uri || "")
+                  }
+                  className="px-4 py-2 bg-indigo-500 rounded-lg"
                 >
-                    {loading ? (
-                        <svg
-                            className="animate-spin h-6 w-6 text-white"
-                            xmlns="http://www.w3.org/2000/svg"
-                            fill="none"
-                            viewBox="0 0 24 24"
-                        >
-                            <circle className="opacity-30" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                            <path className="opacity-80" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.5 0 0 5.5 0 12h4z"></path>
-                        </svg>
-                    ) : (
-                        <span>{fileToUpload ? `Upload: ${uploadedFile?.name || 'Recorded Audio'}` : "Select Audio to Upload"}</span>
-                    )}
-                </button>
-                
-                {/* --- Filter Section --- */}
-                <h2 className="text-2xl font-bold text-gray-800 mb-4 flex items-center">
-                    <FaFilter className="mr-2 text-purple-600" /> Filter Uploads
-                </h2>
-                <div className="flex flex-col sm:flex-row gap-4 mb-6">
-                    <div className="flex-1">
-                        <label htmlFor="startDate" className="block text-sm font-medium text-gray-700 mb-1">
-                            Start Date/Time (Local Time)
-                        </label>
-                        <input
-                            id="startDate"
-                            type="datetime-local"
-                            value={startDate}
-                            onChange={(e) => setStartDate(e.target.value)}
-                            className="w-full p-3 border border-gray-300 rounded-lg shadow-inner focus:ring-indigo-500 focus:border-indigo-500 transition-colors duration-200"
-                        />
-                    </div>
-                    <div className="flex-1">
-                        <label htmlFor="endDate" className="block text-sm font-medium text-gray-700 mb-1">
-                            End Date/Time (Local Time)
-                        </label>
-                        <input
-                            id="endDate"
-                            type="datetime-local"
-                            value={endDate}
-                            onChange={(e) => setEndDate(e.target.value)}
-                            className="w-full p-3 border border-gray-300 rounded-lg shadow-inner focus:ring-indigo-500 focus:border-indigo-500 transition-colors duration-200"
-                        />
-                    </div>
-                    <div className="flex flex-col gap-2">
-                        <button
-                            onClick={handleFilter}
-                            disabled={loading}
-                            className={`sm:mt-6 px-6 py-2 rounded-lg font-semibold text-sm shadow-md transition-all duration-300 transform ${
-                                loading
-                                    ? "bg-gray-300 text-gray-600 cursor-not-allowed"
-                                    : "bg-purple-500 text-white hover:bg-purple-600 active:scale-95"
-                            }`}
-                        >
-                            Apply
-                        </button>
-                        <button
-                            onClick={handleResetFilters}
-                            className={`sm:mt-0 px-6 py-2 rounded-lg font-semibold text-sm shadow-md transition-all duration-300 transform bg-gray-400 text-white hover:bg-gray-500 active:scale-95`}
-                        >
-                            Reset
-                        </button>
-                    </div>
-                </div>
-                
-                {/* --- Recent Uploads --- */}
-                <h2 className="text-2xl font-bold text-gray-800 mb-4">
-                    🎶 Recently Uploaded
-                </h2>
-                
-                <ul className="w-full space-y-3 max-h-64 overflow-y-auto pr-1">
-                    {audios.length > 0 ? (
-                        audios.map((item) => (
-                            <li
-                                key={item.id}
-                                className="w-full bg-white/80 rounded-2xl shadow-sm p-4 flex flex-col sm:flex-row justify-between items-start sm:items-center border border-gray-200 transition-all duration-200 hover:shadow-lg hover:scale-[1.01]"
-                            >
-                                <div className="flex flex-col flex-1 mr-4 mb-2 sm:mb-0 min-w-0">
-                                    <span className="text-gray-900 font-medium truncate">
-                                        {item.metadata?.original_filename || item.file_name} 
-                                    </span>
-                                    {/* FIX 4: Displaying the created_at timestamp in local timezone */}
-                                    <span className="text-xs text-gray-500 mt-1">
-                                        Uploaded: {formatUtcToLocal(item.created_at)}
-                                    </span>
-                                </div>
-                                
-                                {/* DOWNLOAD/LISTEN BUTTON */}
-                                <button
-                                    onClick={() => handleDownload(item.id, item.metadata?.original_filename || item.file_name)}
-                                    disabled={downloadingId === item.id}
-                                    className="px-4 py-2 bg-gradient-to-r from-green-500 to-teal-500 rounded-full text-white font-semibold text-sm shadow-md transition-all duration-200 hover:scale-105 active:scale-95 flex items-center disabled:bg-gray-400 disabled:cursor-wait shrink-0"
-                                >
-                                    {downloadingId === item.id ? (
-                                        <svg className="animate-spin h-4 w-4 mr-1" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                                            <circle className="opacity-30" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                                            <path className="opacity-80" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.5 0 0 5.5 0 12h4z"></path>
-                                        </svg>
-                                    ) : (
-                                        <FaDownload className="mr-1" />
-                                    )}
-                                    {downloadingId === item.id ? 'Downloading...' : 'Download FLAC'}
-                                </button>
-                            </li>
-                        ))
-                    ) : (
-                        <li className="text-center py-4 text-gray-500 italic">
-                            {loading ? "Loading audios..." : "No audios found matching the criteria."}
-                        </li>
-                    )}
-                </ul>
-            </div>
-        </div>
-    );
+                  <Text className="text-white font-semibold">
+                    {isPlayingPreview ? "Stop" : "Play"}
+                  </Text>
+                </TouchableOpacity>
+
+                <Text className="text-sm text-gray-600 flex-1" numberOfLines={1}>
+                  {uploadedFile?.name ||
+                    recordingUri?.split("/").pop() ||
+                    "Preview"}
+                </Text>
+              </View>
+            </View>
+          )}
+
+          <Text className="text-center text-sm text-gray-500 py-2">
+            --- OR ---
+          </Text>
+
+          <TouchableOpacity
+            onPress={handleFileChange}
+            disabled={isRecording || !!recordingUri}
+            className={`flex-row items-center justify-center py-3 rounded-xl border ${
+              isRecording || recordingUri
+                ? "bg-gray-100 border-gray-300"
+                : "bg-white/80 border-indigo-300"
+            }`}
+          >
+            <MaterialCommunityIcons
+              name="upload"
+              size={20}
+              color="#4f46e5"
+              style={{ marginRight: 8 }}
+            />
+            <Text className="text-indigo-700 font-semibold text-base flex-1" numberOfLines={1}>
+              {uploadedFile ? `File: ${uploadedFile.name}` : "Choose File"}
+            </Text>
+          </TouchableOpacity>
+        </View>
+
+        <TouchableOpacity
+          onPress={handleUpload}
+          disabled={loading || !fileToUpload}
+          className={`py-4 rounded-2xl items-center justify-center mb-6 ${
+            loading || !fileToUpload
+              ? "bg-gray-300"
+              : "bg-gradient-to-r from-indigo-500 to-purple-600 bg-indigo-500"
+          }`}
+        >
+          {loading ? (
+            <ActivityIndicator size="small" color="#ffffff" />
+          ) : (
+            <Text className="text-white font-semibold">
+              {fileToUpload
+                ? `Upload: ${uploadedFile?.name || "Recorded Audio"}`
+                : "Select Audio to Upload"}
+            </Text>
+          )}
+        </TouchableOpacity>
+
+        <View className="flex-row items-center gap-2 mb-4">
+          <MaterialCommunityIcons name="filter" size={24} color="#9333ea" />
+          <Text className="text-2xl font-bold text-gray-800">
+            Filter Uploads
+          </Text>
+        </View>
+
+        <View className="gap-4 mb-6">
+          <View>
+            <Text className="text-sm font-medium text-gray-700 mb-1">
+              Start Date/Time
+            </Text>
+            <TouchableOpacity
+              onPress={() => setShowStartDatePicker(true)}
+              className="p-3 border border-gray-300 rounded-lg bg-white"
+            >
+              <Text className="text-gray-900">
+                {formatDateForDisplay(startDate)}
+              </Text>
+            </TouchableOpacity>
+            {showStartDatePicker && (
+              <DateTimePicker
+                value={startDate || new Date()}
+                mode="datetime"
+                display="default"
+                onChange={onChangeStartDate}
+              />
+            )}
+          </View>
+
+          <View>
+            <Text className="text-sm font-medium text-gray-700 mb-1">
+              End Date/Time
+            </Text>
+            <TouchableOpacity
+              onPress={() => setShowEndDatePicker(true)}
+              className="p-3 border border-gray-300 rounded-lg bg-white"
+            >
+              <Text className="text-gray-900">
+                {formatDateForDisplay(endDate)}
+              </Text>
+            </TouchableOpacity>
+            {showEndDatePicker && (
+              <DateTimePicker
+                value={endDate || new Date()}
+                mode="datetime"
+                display="default"
+                onChange={onChangeEndDate}
+              />
+            )}
+          </View>
+
+          <View className="flex-row gap-2 mt-2">
+            <TouchableOpacity
+              onPress={handleFilter}
+              disabled={loading}
+              className={`flex-1 px-6 py-3 rounded-lg ${
+                loading ? "bg-gray-300" : "bg-purple-500"
+              }`}
+            >
+              <Text className="text-white text-center font-semibold">
+                Apply Filter
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              onPress={handleResetFilters}
+              className="flex-1 px-6 py-3 rounded-lg bg-gray-400"
+            >
+              <Text className="text-white text-center font-semibold">
+                Reset
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+
+        <Text className="text-2xl font-bold text-gray-800 mb-4">
+          🎶 Recently Uploaded
+        </Text>
+
+        <ScrollView className="max-h-80">
+          {audios.length > 0 ? (
+            audios.map((item) => (
+              <View
+                key={item.id}
+                className="bg-white/80 rounded-2xl p-4 flex-row justify-between items-center border border-gray-200 mb-3"
+              >
+                <View className="flex-1 mr-4 min-w-0">
+                  <Text
+                    className="text-gray-900 font-medium"
+                    numberOfLines={1}
+                  >
+                    {item.metadata?.original_filename || item.file_name}
+                  </Text>
+                  <Text className="text-xs text-gray-500 mt-1">
+                    Uploaded: {formatUtcToLocal(item.created_at)}
+                  </Text>
+                </View>
+
+                <TouchableOpacity
+                  onPress={() =>
+                    handleDownload(
+                      item.id,
+                      item.metadata?.original_filename || item.file_name
+                    )
+                  }
+                  disabled={downloadingId === item.id}
+                  className="px-4 py-2 bg-green-500 rounded-full flex-row items-center"
+                >
+                  {downloadingId === item.id ? (
+                    <ActivityIndicator size="small" color="#ffffff" />
+                  ) : (
+                    <>
+                      <FontAwesome5
+                        name="download"
+                        size={12}
+                        color="white"
+                        style={{ marginRight: 6 }}
+                      />
+                      <Text className="text-white font-semibold">
+                        Download
+                      </Text>
+                    </>
+                  )}
+                </TouchableOpacity>
+              </View>
+            ))
+          ) : (
+            <Text className="text-center py-4 text-gray-500 italic">
+              {loading ? "Loading audios..." : "No audios found."}
+            </Text>
+          )}
+        </ScrollView>
+      </View>
+    </ScrollView>
+  );
 }
